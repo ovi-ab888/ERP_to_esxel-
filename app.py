@@ -21,74 +21,86 @@ if uploaded_file is not None:
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
-                        if not row or len(row) < 4:
+                        if not row or len(row) < 3:
                             continue
                         
-                        # ১. প্রথম কলাম (STYLE) চেক ও ক্লিন
-                        col0 = str(row[0]).strip() if row[0] else ""
-                        if any(x in col0.upper() for x in ["STYLE", "TOTAL", "GRAND", "INVOICE", "PRODUCT", "OFF0", "THR0"]):
-                            continue
-                        
-                        # স্টাইল আইডেন্টিফাই করার জন্য বেসিক ফিল্টার (যেহেতু স্টাইল সাধারণত SLMD দিয়ে শুরু হচ্ছে)
-                        if "SLMD" not in col0.upper():
-                            continue
-                            
-                        # স্টাইল থেকে নিউলাইন ও স্পেস ক্লিন করা
-                        style = col0.replace("\n", " ").replace("  ", " ").strip()
-                        
-                        # ২. শেষ কলাম (QUANTITY) ক্লিন
-                        qty_raw = str(row[-1]).strip() if row[-1] else ""
-                        if not qty_raw or "PCS" in qty_raw.upper() and len(qty_raw.split("\n")) == 1:
-                            continue
-                        
-                        # কোয়ান্টিটি সেলের ১ম লাইন থেকে শুধু সংখ্যাটি নেওয়া
-                        qty_clean = qty_raw.split("\n")[0].replace(",", "").strip()
-                        try:
-                            qty = float(qty_clean)
-                        except ValueError:
-                            continue
-                        
-                        # ৩. COLOUR এবং SIZE ডিটেকশন
-                        colour = "N/A"
-                        size = "N/A"
-                        
-                        # রোর সমস্ত সেল একসাথে করে সার্চ করা
+                        # সম্পূর্ণ রোর টেক্সট চেক করে হেডার/টোটাল বাদ দেওয়া
                         full_row_text = " ".join([str(cell) for cell in row if cell]).upper()
+                        if any(x in full_row_text for x in ["TOTAL", "GRAND", "PRICE", "INVOICE", "DELIVERY", "PRODUCT", "WIDTH", "LENGTH"]):
+                            continue
                         
-                        # সাইজ চেনার স্ট্যান্ডার্ড লিস্ট
-                        known_sizes = ["XS", "S", "M", "L", "XL", "XXL", "3XL"]
-                        
-                        # সাইজ নির্ধারণ (Euro & Blang এর জন্য)
-                        for s in known_sizes:
-                            # টেক্সটের মধ্যে স্পেস বা নিউলাইন দিয়ে আলাদা করা সাইড চেক
-                            if f" {s} " in f" {full_row_text.replace('\n', ' ')} ":
-                                size = s
-                                break
-                        
-                        # Thermal সাবু স্টিকারের জন্য SACV কোডই সাইজ
-                        if "SACV" in full_row_text:
-                            for cell in row:
-                                if cell and "SACV" in str(cell).upper():
-                                    size = str(cell).strip().replace("\n", "")
+                        # ১. STYLE নির্ধারণ (যে সেলে SLMD আছে সেটি খুঁজে বের করা)
+                        style = None
+                        for cell in row:
+                            if cell and "SLMD" in str(cell).upper():
+                                for line in str(cell).split('\n'):
+                                    if "SLMD" in line.upper():
+                                        style = line.strip().replace(" ", "")
+                                        break
+                                if style:
                                     break
                         
-                        # কালার নির্ধারণ
-                        if "NERO" in full_row_text:
-                            colour = "NERO"
-                        elif "ROSA" in full_row_text:
-                            colour = "VAR ROSA CHIARO"
-                        elif "BIANCO" in full_row_text:
-                            colour = "VAR BIANCO OTTICO"
-                        elif "NUDU" in full_row_text:
-                            colour = "VAR NUDU"
+                        if not style:
+                            continue
                         
-                        # ফাইনাল লিস্টে ডেটা যোগ করা
-                        extracted_rows.append({
-                            "STYLE": style,
-                            "COLOUR": colour,
-                            "SIZE": size,
-                            "Quantity": qty
-                        })
+                        # ২. QUANTITY নির্ধারণ (ডান দিক থেকে প্রথম যে সেলে ভ্যালিড নাম্বার বা নাম্বারের লিস্ট আছে)
+                        qty_list = []
+                        for cell in reversed(row):
+                            if cell:
+                                lines = [l.strip() for l in str(cell).split('\n') if l.strip()]
+                                temp_qtys = []
+                                for l in lines:
+                                    clean_l = l.replace(',', '').strip()
+                                    if "PCS" in clean_l.upper() or "/" in clean_l:
+                                        continue
+                                    try:
+                                        temp_qtys.append(float(clean_l))
+                                    except ValueError:
+                                        break
+                                if temp_qtys:
+                                    qty_list = temp_qtys
+                                    break
+                        
+                        if not qty_list:
+                            continue
+                        
+                        # ৩. SIZE এবং COLOUR নির্ধারণ (লাইন বাই লাইন এক্সট্রাকশন)
+                        sizes = []
+                        colors = []
+                        known_sizes = ["XS", "S", "M", "L", "XL", "XXL", "3XL"]
+                        
+                        for cell in row:
+                            if not cell:
+                                continue
+                            lines = [l.strip() for l in str(cell).split('\n') if l.strip()]
+                            for l in lines:
+                                # সাইজ ম্যাচিং
+                                if l.upper() in known_sizes:
+                                    sizes.append(l.upper())
+                                elif "SACV" in l.upper():
+                                    sizes.append(l.strip())
+                                
+                                # কালার ম্যাচিং
+                                if "NERO" in l.upper():
+                                    colors.append("NERO")
+                                elif "ROSA" in l.upper():
+                                    colors.append("VAR ROSA CHIARO")
+                                elif "BIANCO" in l.upper():
+                                    colors.append("VAR BIANCO OTTICO")
+                                elif "NUDU" in l.upper():
+                                    colors.append("VAR NUDU")
+                        
+                        # ৪. মাল্টিপল কোয়ান্টিটি বা মার্জড রো স্প্লিট করে ডেটা সাজানো
+                        for i, q in enumerate(qty_list):
+                            s = sizes[i] if i < len(sizes) else (sizes[0] if sizes else "N/A")
+                            c = colors[i] if i < len(colors) else (colors[0] if colors else "N/A")
+                            
+                            extracted_rows.append({
+                                "STYLE": style,
+                                "COLOUR": c,
+                                "SIZE": s,
+                                "Quantity": q
+                            })
                             
         if extracted_rows:
             df_result = pd.DataFrame(extracted_rows)
@@ -112,4 +124,4 @@ if uploaded_file is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ দুঃখিত! এই পিডিএফ থেকে কোনো ডেটা এক্সট্রাক্ট করা যায়নি। কোডের ম্যাচিং লজিকটি আরেকবার রিভিউ করা দরকার।")
+            st.error("❌ দুঃখিত! এই পিডিএফ থেকে নির্দিষ্ট ফরম্যাটে কোনো ডেটা খুঁজে পাওয়া যায়নি।")
