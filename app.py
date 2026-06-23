@@ -16,81 +16,68 @@ if uploaded_file is not None:
     with st.spinner("ডেটা গভীরভাবে প্রসেস করা হচ্ছে... অনুগ্রহ করে অপেক্ষা করুন।"):
         extracted_rows = []
         
-        # পিডিএফ রিড করা শুরু
         with pdfplumber.open(uploaded_file) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
+            for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
-                        # যদি রো খালি হয় বা হেডার/টোটাল টাইপ রো হয় তবে স্কিপ
                         if not row or len(row) < 4:
                             continue
                         
-                        # প্রথম কলামের টেক্সট চেক
+                        # ১. STYLE এক্সট্রাক্ট ও ক্লিন করা (১ম কলাম)
                         col0 = str(row[0]).strip() if row[0] else ""
-                        if any(x in col0.upper() for x in ["STYLE", "OFF0", "THR0", "TOTAL", "GRAND", "INVOICE", "PRODUCT"]):
+                        if any(x in col0.upper() for x in ["STYLE", "TOTAL", "GRAND", "INVOICE", "PRODUCT"]):
                             continue
                         
-                        # STYLE এবং QUANTITY বেসিক ক্লিন
-                        style = col0.replace("\n", "").replace(" ", "")
+                        # প্রথম লাইন বা স্পেস রিমুভ করে ক্লিন স্টাইল নেওয়া
+                        style = col0.split("\n")[0].strip().replace(" ", "")
+                        if not style or style.startswith("OFF") or style.startswith("THR"):
+                            continue
                         
-                        # শেষ কলাম সাধারণত Quantity হয়
+                        # ২. QUANTITY এক্সট্রাক্ট ও ক্লিন করা (শেষ কলাম)
                         qty_raw = str(row[-1]).strip() if row[-1] else ""
-                        if not qty_raw or "PCS" in qty_raw.upper() or "/" in qty_raw:
+                        if not qty_raw or "PCS" in qty_raw.upper() and len(qty_raw.split("\n")) == 1:
                             continue
                         
-                        # কোয়ান্টিটি নম্বর ফরম্যাটে নেওয়া (প্রথম অংশ, যদি নিউলাইন থাকে)
-                        qty_clean = qty_raw.split("\n")[0].replace(",", "")
+                        # যদি কোয়ান্টিটি সেলের ভেতর টোটাল বা এক্সট্রা নম্বর ঢুকে থাকে, শুধু ১ম লাইনের মেইন কোয়ান্টিটি নেওয়া
+                        qty_clean = qty_raw.split("\n")[0].replace(",", "").strip()
                         try:
                             qty = float(qty_clean)
                         except ValueError:
                             continue
                         
-                        # প্রাথমিক মান নির্ধারণ
+                        # ৩. COLOUR এবং SIZE নির্ধারণ
                         colour = "N/A"
                         size = "N/A"
-                        
-                        # সাইজ চেনার স্ট্যান্ডার্ড লিস্ট
                         known_sizes = ["XS", "S", "M", "L", "XL", "XXL", "3XL"]
                         
-                        # --- প্যাটার্ন ১: ৩ নম্বর কলামে (row[2]) সব ডেটা একসাথে থাকা (যেমন পৃষ্ঠা ১ এর Euro Sticker) ---
-                        col2_raw = str(row[2]).strip() if row[2] else ""
-                        lines = [line.strip() for line in col2_raw.split("\n") if line.strip()]
+                        # পুরো রোর সব টেক্সট কম্বাইন করে সার্চ করা (যাতে কলাম এদিক ওদিক হলেও ডেটা মিস না হয়)
+                        full_row_text = " ".join([str(cell) for cell in row if cell])
+                        lines = [line.strip() for line in full_row_text.split("\n") if line.strip()]
                         
+                        # সাইজ খোঁজা (যেমন: XS, S, M অথবা Thermal জবের SACV কোড)
                         for line in lines:
-                            if line in known_sizes:
-                                size = line
-                            elif "STICKER" not in line.upper() and "CM X" not in line.upper() and line != "VAR" and len(line) > 1:
-                                # কালার ফিল্টার (যেমন: NERO, VAR ROSA CHIARO)
-                                if colour == "N/A":
-                                    colour = line
-                                elif line not in colour:
-                                    colour += " " + line
+                            clean_line = line.replace(",", "").strip()
+                            if clean_line in known_sizes:
+                                size = clean_line
+                            elif "SACV" in clean_line.upper():
+                                # Thermal জবের ক্ষেত্রে SACV কোডটিই সাইজ হিসেবে গণ্য হবে
+                                size = clean_line.split()[-1] 
                         
-                        # --- প্যাটার্ন ২: আলাদা কলামে কালার ও সাইজ থাকা (যেমন পৃষ্ঠা ২ এর Blang Sticker) ---
-                        # ৪ নম্বর কলামে যদি কালার থাকে
-                        if len(row) > 3 and row[3]:
-                            c_val = str(row[3]).strip().replace("\n", " ")
-                            if any(k in c_val.upper() for k in ["NERO", "ROSA", "BIANCO", "NUDU", "VAR"]):
-                                colour = c_val
-                                
-                        # ৬ নম্বর কলামে যদি সাইজ থাকে
-                        if len(row) > 5 and row[5]:
-                            s_val = str(row[5]).strip()
-                            if s_val in known_sizes:
-                                size = s_val
-                                
-                        # --- প্যাটার্ন ৩: Thermal Sabu Sticker (পৃষ্ঠা ৪-৭) ---
-                        # এখানে ৩ নম্বর কলামে 'N/A' থাকে এবং ৫ নম্বর কলামে 'SACV...' কোডটিই সাইজ হিসেবে কাজ করে
-                        if colour == "N/A" and len(row) > 3 and str(row[2]).strip() == "N/A":
-                            colour = "N/A"
-                            if len(row) > 4 and row[3]: # ৪ নম্বর কলামে SACV কোড থাকে
-                                size = str(row[3]).strip().replace("\n", "")
-                            elif len(row) > 5 and row[4]: # অথবা ৫ নম্বর কলামে
-                                size = str(row[4]).strip().replace("\n", "")
+                        # কালার খোঁজা (Euro & Blang স্টিকারের জন্য)
+                        if "NERO" in full_row_text.upper():
+                            colour = "NERO"
+                        elif "ROSA CHIARO" in full_row_text.upper() or "ROSA" in full_row_text.upper():
+                            colour = "VAR ROSA CHIARO"
+                        elif "BIANCO" in full_row_text.upper():
+                            colour = "VAR BIANCO OTTICO"
+                        elif "NUDU" in full_row_text.upper():
+                            colour = "VAR NUDU"
+                        else:
+                            colour = "N/A" # Thermal জবের জন্য N/A থাকবে
                         
-                        # ফাইনাল ডেটা স্টোর
-                        if style and (colour != "N/A" or size != "N/A"):
+                        # লিস্টে যোগ করা
+                        if style:
                             extracted_rows.append({
                                 "STYLE": style,
                                 "COLOUR": colour,
@@ -98,23 +85,21 @@ if uploaded_file is not None:
                                 "Quantity": qty
                             })
                             
-        # DataFrame তৈরি এবং ডুপ্লিকেট মার্জ করা
         if extracted_rows:
             df_result = pd.DataFrame(extracted_rows)
             
-            # একই STYLE, COLOUR, SIZE হলে কোয়ান্টিটি যোগ (Sum) হবে
+            # একই STYLE, COLOUR, SIZE এর ডুপ্লিকেট রো থাকলে কোয়ান্টিটি যোগ (Sum) করে দেওয়া হবে
             df_result = df_result.groupby(["STYLE", "COLOUR", "SIZE"], as_index=False)["Quantity"].sum()
             
             st.subheader("📊 আপনার এক্সেল ডেটার প্রিভিউ:")
             st.dataframe(df_result)
             
-            # Excel ফাইল তৈরি (Memory Buffer-এ)
+            # Excel ফাইল তৈরি
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_result.to_excel(writer, sheet_name="Style_Breakdown", index=False)
             output.seek(0)
             
-            # ডাউনলোড বাটন
             st.download_button(
                 label="📥 Excel ফাইল ডাউনলোড করুন",
                 data=output,
@@ -122,4 +107,4 @@ if uploaded_file is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ দুঃখিত! এই পিডিএফ-এর টেবিল ফরম্যাটের সাথে লজিক মিলছে না। অনুগ্রহ করে টেক্সট ফরম্যাটটি আরেকবার নিশ্চিত করুন।")
+            st.error("❌ দুঃখিত! এই পিডিএফ থেকে কোনো ডেটা এক্সট্রাক্ট করা যায়নি। কোডের ম্যাচিং লজিকটি আরেকবার রিভিউ করা দরকার।")
